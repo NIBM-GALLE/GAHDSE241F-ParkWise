@@ -1,0 +1,455 @@
+const Transaction = require('../models/transactionModel');
+const Landowner = require('../models/LandOwner');
+const Booking = require('../models/bookingmodel');
+const Billing = require('../models/Billingmodel');
+const BulkBookingChunk = require('../models/bulkbooking');
+const User = require('../models/usermodel');
+const Parking = require('../models/parkingmodel');
+
+// Create a new transaction
+const createTransaction = async (req, res) => {
+  try {
+    const transaction = new Transaction(req.body);
+    await transaction.save();
+    res.status(201).json(transaction);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
+// Get all transactions (with landowner name for admin payouts)
+const getAllTransactions = async (req, res) => {
+  try {
+    console.log('[API] GET /api/transactions called');
+
+    let transactions = await Transaction.find().lean();
+    console.log('[API] Transactions fetched:', transactions.length);
+
+    const adminTransactions = transactions.filter(t => t.type === 'admin' && t.LandOwnerID);
+    if (adminTransactions.length > 0) {
+      const landownerIds = [...new Set(adminTransactions.map(t => t.LandOwnerID.toString()))];
+      const landowners = await Landowner.find({ _id: { $in: landownerIds } }).select('_id username').lean();
+
+      const landownerMap = {};
+      landowners.forEach(l => {
+        landownerMap[l._id.toString()] = l.username;
+      });
+
+      transactions = transactions.map(t => {
+        if (t.type === 'admin' && t.LandOwnerID) {
+          return { ...t, landownerName: landownerMap[t.LandOwnerID.toString()] || 'Unknown' };
+        }
+        return t;
+      });
+      console.log('[API] Admin transactions mapped with landowner names');
+    }
+
+    transactions = transactions.map(t => {
+      if (t.type === 'admin') {
+        const { LandOwnerID, ...rest } = t;
+        return rest;
+      }
+      return t;
+    });
+
+    console.log('[API] Sending transactions response:', transactions.length);
+    res.status(200).json(transactions);
+  } catch (error) {
+    console.error('Error fetching transactions:', error);
+    res.status(500).json({ message: 'Error retrieving transactions', error: error.message });
+  }
+};
+
+// Get a single transaction by ID
+const getTransactionById = async (req, res) => {
+  try {
+    const transaction = await Transaction.findById(req.params.id)
+      .populate('bookingId')
+      .populate('billingId');
+
+    if (!transaction) return res.status(404).json({ error: 'Not found' });
+    res.json(transaction);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Update a transaction
+const updateTransaction = async (req, res) => {
+  try {
+    const transaction = await Transaction.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true }
+    );
+    if (!transaction) return res.status(404).json({ error: 'Not found' });
+    res.json(transaction);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
+// Delete a transaction
+const deleteTransaction = async (req, res) => {
+  try {
+    const transaction = await Transaction.findByIdAndDelete(req.params.id);
+    if (!transaction) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const getAllTransactionsWithDetails = async (req, res) => {
+  try {
+    console.log('[API] GET /api/transactions (with details and summary) called');
+    let transactions = await Transaction.find().lean();
+    console.log('[API] Transactions fetched:', transactions.length);
+
+    // --- ADMIN: Add landowner name ---
+    const adminTransactions = transactions.filter(t => t.type === 'admin' && t.LandOwnerID);
+    let landownerMap = {};
+    if (adminTransactions.length > 0) {
+      const landownerIds = [...new Set(adminTransactions.map(t => t.LandOwnerID.toString()))];
+      const landowners = await Landowner.find({ _id: { $in: landownerIds } }).select('_id username').lean();
+      landowners.forEach(l => { landownerMap[l._id.toString()] = l.username; });
+    }
+
+    // --- BOOKING: Add user name ---
+    const bookingTransactions = transactions.filter(t => t.type === 'booking' && t.bookingId);
+    let bookingUserMap = {};
+    if (bookingTransactions.length > 0) {
+      const bookingIds = [...new Set(bookingTransactions.map(t => t.bookingId.toString()))];
+      const bookings = await Booking.find({ _id: { $in: bookingIds } }).select('_id userId').lean();
+      const userIds = [...new Set(bookings.map(b => b.userId.toString()))];
+      const users = await User.find({ _id: { $in: userIds } }).select('_id username').lean();
+      const userMap = {};
+      users.forEach(u => { userMap[u._id.toString()] = u.username; });
+      bookings.forEach(b => { bookingUserMap[b._id.toString()] = userMap[b.userId.toString()] || 'Unknown'; });
+    }    // --- BILLING: Add parking name ---
+    const billingTransactions = transactions.filter(t => t.type === 'billing' && t.billingId);
+    let billingParkingMap = {};
+    if (billingTransactions.length > 0) {
+      const billingIds = [...new Set(billingTransactions.map(t => t.billingId.toString()))];
+      const billings = await Billing.find({ _id: { $in: billingIds } }).select('_id parkingID').lean();
+      const parkingIds = [...new Set(billings.map(b => b.parkingID))];      const parkings = await Parking.find({ _id: { $in: parkingIds } }).select('_id name').lean();
+      const parkingMap = {};
+      parkings.forEach(p => { parkingMap[p._id.toString()] = p.name; });
+      billings.forEach(b => { billingParkingMap[b._id.toString()] = parkingMap[b.parkingID?.toString()] || 'Unknown'; });
+    }
+
+    // --- BULK BOOKING: Add user and chunk details ---
+    const bulkBookingTransactions = transactions.filter(t => t.type === 'bulkbooking' && t.bulkBookingId);
+    let bulkBookingUserMap = {};
+    if (bulkBookingTransactions.length > 0) {
+      const bulkBookingIds = [...new Set(bulkBookingTransactions.map(t => t.bulkBookingId.toString()))];
+      const bulkBookings = await BulkBookingChunk.find({ _id: { $in: bulkBookingIds } }).select('_id user chunkName company').lean();
+      const userIds = [...new Set(bulkBookings.map(bb => bb.user.toString()))];
+      const users = await User.find({ _id: { $in: userIds } }).select('_id username').lean();
+      const userMap = {};
+      users.forEach(u => { userMap[u._id.toString()] = u.username; });
+      bulkBookings.forEach(bb => { 
+        bulkBookingUserMap[bb._id.toString()] = {
+          userName: userMap[bb.user.toString()] || 'Unknown',
+          chunkName: bb.chunkName || 'Bulk Booking',
+          company: bb.company || 'Unknown Company'
+        };
+      });
+    }    // --- Compose final transactions ---
+    transactions = transactions.map(t => {
+      if (t.type === 'admin' && t.LandOwnerID) {
+        return { ...t, landownerName: landownerMap[t.LandOwnerID.toString()] || 'Unknown' };
+      }
+      if (t.type === 'booking' && t.bookingId) {
+        return { ...t, bookedBy: bookingUserMap[t.bookingId.toString()] || 'Unknown' };
+      }
+      if (t.type === 'billing' && t.billingId) {
+        return { ...t, parkingName: billingParkingMap[t.billingId.toString()] || 'Unknown' };
+      }
+      if (t.type === 'bulkbooking' && t.bulkBookingId) {
+        const bulkInfo = bulkBookingUserMap[t.bulkBookingId.toString()];
+        if (bulkInfo) {
+          return { 
+            ...t, 
+            bookedBy: bulkInfo.userName,
+            chunkName: bulkInfo.chunkName,
+            company: bulkInfo.company
+          };
+        }
+      }
+      return t;
+    });
+
+    // Remove LandOwnerID for admin transactions
+    transactions = transactions.map(t => {
+      if (t.type === 'admin') {
+        const { LandOwnerID, ...rest } = t;
+        return rest;
+      }
+      return t;
+    });
+
+    // --- Calculate summary ---
+    const summary = transactions.reduce((acc, t) => {
+      if (!acc.byType[t.type]) acc.byType[t.type] = 0;
+      acc.byType[t.type] += t.amount || 0;
+      acc.total += t.amount || 0;
+      return acc;
+    }, { byType: {}, total: 0 });
+
+    console.log('[API] Sending transactions response with summary:', transactions.length);
+    
+    res.status(200).json({
+      transactions,
+      summary
+    });
+
+  } catch (error) {
+    console.error('Error fetching transactions:', error);
+    res.status(500).json({ message: 'Error retrieving transactions', error: error.message });
+  }
+};
+
+// Get transformed transaction details 
+const getTransactionDetails = async (req, res) => {
+  try {
+    console.log('[API] GET /api/transactions/details called');
+    let transactions = await Transaction.find().lean();
+    console.log('[API] Transactions fetched:', transactions.length);    // Collect all necessary IDs for fetching related data
+    const adminTransactionIds = transactions.filter(t => t.type === 'admin').map(t => t.LandOwnerID).filter(Boolean);
+    const bookingTransactionIds = transactions.filter(t => t.type === 'booking').map(t => t.bookingId).filter(Boolean);
+    const billingTransactionIds = transactions.filter(t => t.type === 'billing').map(t => t.billingId).filter(Boolean);
+    const bulkBookingTransactionIds = transactions.filter(t => t.type === 'bulkbooking').map(t => t.bulkBookingId).filter(Boolean);
+
+    // Fetch landowners for admin transactions
+    const landowners = adminTransactionIds.length > 0 
+      ? await Landowner.find({ _id: { $in: adminTransactionIds } }).select('_id username').lean()
+      : [];
+    const landownerMap = landowners.reduce((map, lo) => {
+      map[lo._id.toString()] = lo.username;
+      return map;
+    }, {});
+
+    // Fetch bookings and related users
+    const bookings = bookingTransactionIds.length > 0
+      ? await Booking.find({ _id: { $in: bookingTransactionIds } }).select('_id userId').lean()
+      : [];
+    const bookingUserIds = bookings.map(b => b.userId).filter(Boolean);
+    const bookingUsers = bookingUserIds.length > 0
+      ? await User.find({ _id: { $in: bookingUserIds } }).select('_id username').lean()
+      : [];
+    const userMap = bookingUsers.reduce((map, user) => {
+      map[user._id.toString()] = user.username;
+      return map;
+    }, {});
+    const bookingMap = bookings.reduce((map, booking) => {
+      map[booking._id.toString()] = booking.userId ? userMap[booking.userId.toString()] : 'Unknown';
+      return map;
+    }, {});
+
+    // Fetch billings and related parkings
+    const billings = billingTransactionIds.length > 0
+      ? await Billing.find({ _id: { $in: billingTransactionIds } }).select('_id parkingID userId').lean()
+      : [];
+    const billingUserIds = billings.map(b => b.userId).filter(Boolean);
+    const billingUsers = billingUserIds.length > 0
+      ? await User.find({ _id: { $in: billingUserIds } }).select('_id username').lean()
+      : [];
+    const billingUserMap = billingUsers.reduce((map, user) => {
+      map[user._id.toString()] = user.username;
+      return map;
+    }, {});    const billingMap = billings.reduce((map, billing) => {
+      map[billing._id.toString()] = billing.userId ? billingUserMap[billing.userId.toString()] : 'Unknown';
+      return map;
+    }, {});
+
+    // Fetch bulk bookings and related users
+    const bulkBookings = bulkBookingTransactionIds.length > 0
+      ? await BulkBookingChunk.find({ _id: { $in: bulkBookingTransactionIds } }).select('_id user chunkName company').lean()
+      : [];
+    const bulkBookingUserIds = bulkBookings.map(bb => bb.user).filter(Boolean);
+    const bulkBookingUsers = bulkBookingUserIds.length > 0
+      ? await User.find({ _id: { $in: bulkBookingUserIds } }).select('_id username').lean()
+      : [];
+    const bulkBookingUserMap = bulkBookingUsers.reduce((map, user) => {
+      map[user._id.toString()] = user.username;
+      return map;
+    }, {});
+    const bulkBookingMap = bulkBookings.reduce((map, bulkBooking) => {
+      const userName = bulkBooking.user ? bulkBookingUserMap[bulkBooking.user.toString()] : 'Unknown';
+      map[bulkBooking._id.toString()] = `${userName} (${bulkBooking.chunkName || 'Bulk Booking'})`;
+      return map;
+    }, {});
+
+    // Transform transactions to the required format
+    const formattedTransactions = transactions.map(transaction => {
+      const { _id, amount, method, status, date } = transaction;
+      let type = transaction.type;
+      let name = 'Unknown';      // Change admin type to payout
+      if (type === 'admin') {
+        type = 'payout';
+        name = transaction.LandOwnerID && landownerMap[transaction.LandOwnerID.toString()] || 'Unknown Landowner';
+      } 
+      // Get username for booking transactions
+      else if (type === 'booking') {
+        name = transaction.bookingId && bookingMap[transaction.bookingId.toString()] || 'Unknown User';
+      } 
+      // Get username for billing transactions
+      else if (type === 'billing') {
+        name = transaction.billingId && billingMap[transaction.billingId.toString()] || 'Unknown User';
+      }
+      // Get username for bulk booking transactions
+      else if (type === 'bulkbooking') {
+        name = transaction.bulkBookingId && bulkBookingMap[transaction.bulkBookingId.toString()] || 'Unknown User';
+      }
+
+      return {
+        _id,
+        type,
+        amount,
+        method,
+        status,
+        date,
+        name
+      };
+    });
+
+    console.log('[API] Sending formatted transactions response:', formattedTransactions.length);
+    res.status(200).json(formattedTransactions);
+  } catch (error) {
+    console.error('Error fetching transaction details:', error);
+    res.status(500).json({ message: 'Error retrieving transaction details', error: error.message });
+  }
+};
+
+// Get transactions by user ID
+const getTransactionsByUserId = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    if (!userId) {
+      return res.status(400).json({ message: 'User ID is required' });
+    }
+    
+    console.log(`[API] GET /api/transactions/user/${userId} called`);
+    
+    // Find all transactions for this user
+    const transactions = await Transaction.find({ userId }).lean();
+    
+    console.log(`[API] Found ${transactions.length} transactions for user ${userId}`);
+    
+    if (transactions.length === 0) {
+      return res.status(200).json({ 
+        transactions: [],
+        summary: {
+          byType: { booking: 0, billing: 0 },
+          total: 0
+        }
+      });
+    }
+    
+    // Populate related data
+    const bookingIds = transactions
+      .filter(t => t.type === 'booking' && t.bookingId)
+      .map(t => t.bookingId);
+      
+    const billingIds = transactions
+      .filter(t => t.type === 'billing' && t.billingId)
+      .map(t => t.billingId);
+    
+    // Fetch booking and billing details if needed
+    let bookings = [];
+    let billings = [];
+    
+    if (bookingIds.length > 0) {
+      bookings = await Booking.find({ _id: { $in: bookingIds } }).lean();
+    }
+    
+    if (billingIds.length > 0) {
+      billings = await Billing.find({ _id: { $in: billingIds } }).lean();
+    }
+    
+    // Create maps for quick lookup
+    const bookingMap = bookings.reduce((map, booking) => {
+      map[booking._id.toString()] = booking;
+      return map;
+    }, {});
+    
+    const billingMap = billings.reduce((map, billing) => {
+      map[billing._id.toString()] = billing;
+      return map;
+    }, {});
+    
+    // Enrich transaction data with related info
+    const enrichedTransactions = transactions.map(transaction => {
+      const enriched = { ...transaction };
+      
+      if (transaction.type === 'booking' && transaction.bookingId) {
+        const bookingId = transaction.bookingId.toString();
+        if (bookingMap[bookingId]) {
+          enriched.bookingDetails = {
+            parkingName: bookingMap[bookingId].parkingName || 'Unknown',
+            startTime: bookingMap[bookingId].startTime,
+            endTime: bookingMap[bookingId].endTime,
+            vehicleNumber: bookingMap[bookingId].vehicleNumber
+          };
+        }
+      } else if (transaction.type === 'billing' && transaction.billingId) {
+        const billingId = transaction.billingId.toString();
+        if (billingMap[billingId]) {
+          enriched.billingDetails = {
+            parkingName: billingMap[billingId].parkingName || 'Unknown',
+            checkInTime: billingMap[billingId].checkInTime,
+            checkOutTime: billingMap[billingId].checkOutTime,
+            vehicleNumber: billingMap[billingId].vehicleNumber
+          };
+        }
+      }
+      
+      return enriched;
+    });
+    
+    // Calculate summary statistics
+    const summary = enrichedTransactions.reduce(
+      (acc, transaction) => {
+        // Update type totals
+        if (!acc.byType[transaction.type]) {
+          acc.byType[transaction.type] = 0;
+        }
+        acc.byType[transaction.type] += transaction.amount;
+        
+        // Update total amount
+        acc.total += transaction.amount;
+        
+        return acc;
+      },
+      { byType: {}, total: 0 }
+    );
+    
+    console.log(`[API] Sending ${enrichedTransactions.length} transactions with summary`);
+    
+    res.status(200).json({
+      transactions: enrichedTransactions,
+      summary
+    });
+    
+  } catch (error) {
+    console.error('Error fetching user transactions:', error);
+    res.status(500).json({ 
+      message: 'Error retrieving transactions', 
+      error: error.message 
+    });
+  }
+};
+
+// Export all functions
+module.exports = {
+  createTransaction,
+  getAllTransactions,
+  getTransactionById,
+  updateTransaction,
+  deleteTransaction,
+  getAllTransactionsWithDetails,
+  getTransactionDetails,
+  getTransactionsByUserId,
+};

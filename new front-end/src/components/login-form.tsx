@@ -1,0 +1,205 @@
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+
+type UserRole = "user" | "admin" | "landowner" | "Parking Coordinator";
+
+const roleDashboardMap: Record<UserRole, string> = {
+  user: "/dashboard/user",
+  admin: "/Admin Dashboard",
+  'Parking Coordinator': "/Parking Coordinator Dashboard",
+  landowner: "/Land Owner Dashboard",
+ 
+};
+
+export function LoginForm({
+  className,
+  ...props
+}: React.ComponentPropsWithoutRef<"form">) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [showOtp, setShowOtp] = useState(false);
+  const [otp, setOtp] = useState("");
+  const navigate = useNavigate();
+  const [userIdFromLogin, setUserIdFromLogin] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    try {
+      const res = await fetch("http://localhost:5000/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+        credentials: "include",
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.message || "Login failed");
+        setLoading(false);
+        return;
+      }
+
+      // If 2FA is required, show OTP input on same page
+      if (data.is2FAEnabled || data.message === "Enter OTP") {
+        setUserIdFromLogin(data.userId);
+        setShowOtp(true);
+        setLoading(false);
+        return;
+      }
+
+      // Role-based redirection
+      const role = data.role as UserRole;
+      if (role && roleDashboardMap[role]) {
+        navigate(roleDashboardMap[role]);
+        //referesh the page to ensure the new role is applied
+        window.location.reload();
+      } else {
+        // fallback if role is missing or unknown
+        navigate("/dashboard");
+      }
+    } catch (err) {
+      setError("An unexpected error occurred.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // OTP submit handler
+  const handleOtpSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("http://localhost:5000/api/auth/verify-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: userIdFromLogin, otp }),
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.message || "OTP verification failed");
+        setLoading(false);
+        return;
+      }
+      const role = data.role as UserRole;
+      if (role && roleDashboardMap[role]) {
+        navigate(roleDashboardMap[role]);
+        window.location.reload();
+      } else {
+        navigate("/dashboard");
+      }
+    } catch (err) {
+      setError("An unexpected error occurred.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={showOtp ? handleOtpSubmit : handleSubmit}
+      className={cn("flex flex-col gap-6", className)}
+      {...props}
+    >
+      <div className="flex flex-col items-center gap-2 text-center">
+        <h1 className="text-2xl font-bold">
+          {showOtp ? "Enter OTP" : "Login to your account"}
+        </h1>
+        <p className="text-balance text-sm text-muted-foreground">
+          {showOtp
+            ? "Enter the 6-digit code from your authenticator app or backup code"
+            : "Enter your username below to login to your account"}
+        </p>
+      </div>
+      {error && <p className="text-red-500 text-center">{error}</p>}
+      <div className="grid gap-6">
+        {!showOtp && (
+          <>
+            <div className="grid gap-2">
+              <Label htmlFor="username">Username</Label>
+              <Input
+                id="username"
+                type="text"
+                placeholder="your_username"
+                required
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
+                disabled={loading}
+              />
+            </div>
+            <div className="grid gap-2">
+              <div className="flex items-center">
+                <Label htmlFor="password">Password</Label>
+                <a
+                  href="#"
+                  className="ml-auto text-sm underline-offset-4 hover:underline"
+                >
+                  Forgot your password?
+                </a>
+              </div>
+              <Input
+                id="password"
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                disabled={loading}
+              />
+            </div>
+          </>
+        )}
+        {showOtp && (
+          <div className="grid gap-2">
+            <Label htmlFor="otp">OTP</Label>
+            <Input
+              id="otp"
+              type="text"
+              placeholder="123456 or backup code"
+              required
+              value={otp}
+              onChange={e => setOtp(e.target.value.replace(/\D/g, ""))}
+              autoComplete="one-time-code"
+              disabled={loading}
+            />
+          </div>
+        )}
+        <Button type="submit" className="w-full" disabled={loading}>
+          {loading ? (showOtp ? "Verifying..." : "Logging in...") : (showOtp ? "Verify" : "Login")}
+        </Button>
+      </div>
+      {!showOtp && (
+        <>
+          <div className="relative text-center text-sm after:absolute after:inset-0 after:top-1/2 after:z-0 after:flex after:items-center after:border-t after:border-border">
+            <span className="relative z-10 bg-background px-2 text-muted-foreground">
+              Or continue with
+            </span>
+          </div>
+          <Button variant="outline" className="w-full" type="button" disabled={loading}>
+            Login with Google
+          </Button>
+          <div className="text-center text-sm">
+            Don&apos;t have an account?{" "}
+            <a href="/signup" className="underline underline-offset-4">
+              Sign up
+            </a>
+          </div>
+        </>
+      )}
+    </form>
+  );
+}
+
+
